@@ -3,6 +3,7 @@ const jwt = require('jsonwebtoken');
 const authenticateUser = (req, res, next) => {
   // deconstructure the accessToken from cookies
   const { accessToken } = req.cookies;
+  console.log("accessToken:", accessToken);
   if (!accessToken) {
     return next({
       log: 'No access token provided',
@@ -12,7 +13,7 @@ const authenticateUser = (req, res, next) => {
     });
   }
   // verify if the token match with JWT_SECRET
-  jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
+  jwt.verify(accessToken, process.env.JWT_SECRET, (err, decoded) => {
     if (err) {
       return next({
         log: 'Invalid or expired token provided',
@@ -22,7 +23,8 @@ const authenticateUser = (req, res, next) => {
       });
     }
     // decoded userId attach to req.user
-    req.user = decoded.userId;
+    req.user = decoded;
+    console.log("Authenticated user:", req.user);
     next();
   });
 };

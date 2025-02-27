@@ -1,15 +1,8 @@
-require('dotenv').config();
-const jwt = require('jsonwebtoken');
-const { createClient } = require('@supabase/supabase-js');
 
-// setup Supabase
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY, {
-  auth: {
-    persistSession: true,
-    autoRefreshToken: true,
-    detectSessionInUrl: true,
-  }
-});
+import jwt from 'jsonwebtoken';
+import fetch from 'node-fetch'; // Required for older Node versions
+import dotenv from 'dotenv';
+dotenv.config();
 
 // generate JWT token (short-lived)
 const generateToken = (userId) => {
@@ -20,88 +13,110 @@ const generateToken = (userId) => {
 
 // generate refresh token (long-lived) to get new JWT token
 const generateRefreshToken = (userId) => {
-  return jwt.sign({ id: userId }, process.env.REFRESH_SECRET, { expiresIn: '7d' });
-}
+  return jwt.sign({ id: userId }, process.env.REFRESH_SECRET, {
+    expiresIn: '7d',
+  });
+};
 
 // Github OAuth login function => redirect to github login page
 const githubLogin = async (req, res, next) => {
   try {
-    // contacts Google to start the login process
-    const { data, error } = await supabase.auth.signInWithOAuth({
-      provider: 'github',
-      // after log in, google should redirect user back
-      options: { redirectTo: 'http://localhost:8080/auth/callback' }
+    const clientId = process.env.GITHUB_CLIENT_ID; 
+    const redirectUri = 'http://localhost:8080/auth/callback';
+    const githubAuthUrl = `https://github.com/login/oauth/authorize?client_id=${clientId}&redirect_uri=${encodeURIComponent(
+      redirectUri
+    )}&scope=user:email`;
 
-    });
-
-    console.log('GitHub OAuth Login Response:', data, error); 
-
-    if (error) {
-      return next({
-        log: `Github OAuth Error: ${error.message}`,
-        // 400: Bad request, The server cannot or will not process the request 
-        status: 400,
-        message: { err: 'Github login failed' },
-      });
-    }
-    console.log('Redirecting to GitHub OAuth:', data.url);
-
-    // no error, Google login page is attached to data.url
-    res.redirect(data.url);
+    console.log('Redirecting to GitHub OAuth:', githubAuthUrl);
+    // res.redirect(`http://localhost:8080/`);
+    res.redirect(githubAuthUrl);
   } catch (err) {
     return next(err);
   }
-}
+};
 
 // github OAuth callback function => to handle response after log in
 const githubCallback = async (req, res, next) => {
+  // const controller = new AbortController();
+  // const timeout = setTimeout(() => controller.abort(), 5000); 
   try {
-    console.log('OAuth Callback Query Params:', req.query);
-  console.log('Full Request URL:', req.originalUrl);
+    const { code } = req.query;
+    console.log('GitHub Code:', code);
+    if (!code) {
+      return next({ status: 400, message: 'Missing authorization code' });
+    }
 
-  const { code, state } = req.query;
+    console.log("before tokenResponse: ");
+    console.log('GitHub Code:', code); 
+  console.log('Client ID:', process.env.GITHUB_CLIENT_ID);
+  console.log('Client Secret:', process.env.GITHUB_CLIENT_SECRET);
 
-  if (!code) {
-    console.error('GitHub OAuth callback failed: Missing code');
-    return next({
-      log: 'GitHub OAuth callback failed: Missing code',
-      status: 400,
-      message: { err: 'Missing authorization code' },
+    // POST to get a JSON include access_token
+    const tokenResponse = await fetch('https://github.com/login/oauth/access_token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({
+        client_id: process.env.GITHUB_CLIENT_ID,
+        client_secret: process.env.GITHUB_CLIENT_SECRET,
+        code,
+      }),
+      // signal: controller.signal,
     });
-  }
-  if (!state) {
-    console.error('GitHub OAuth callback failed: Missing state parameter');
-    return next({
-      log: 'GitHub OAuth callback failed: Missing state parameter',
-      status: 400,
-      message: { err: 'Missing state parameter' },
-    });
-  }
-    const { data, error } = await supabase.auth.exchangeCodeForSession(code);
+    console.log('Fetch Completed'); 
+  //   clearTimeout(timeout); // Clear timeout if request completes
+  // console.log('Fetch Completed');
+    // .catch(err => {
+    //   console.error("Fetch Error:", err);
+    //   throw new Error('Failed to contact GitHub API');
+    // }).finally(clearTimeout(timeout)); 
 
-
-    console.log('GitHub OAuth Callback - User Data:', data, error);
-
-    if (error || !data?.user) {
+    if (!tokenResponse.ok) {
+      console.error('GitHub OAuth token request failed:', tokenResponse.status, tokenResponse.statusText);
+      const errorText = await tokenResponse.text(); // Read response as text to see errors
+      console.error('Error details:', errorText);
       return next({
-        log: 'Github OAuth callback failed: No valid session',
-        // 401: Unauthorized, client need authenticate to get response
-        status: 401,
-        message: { err: 'Unauthorized' },
+        log: 'GitHub OAuth token request failed',
+        status: tokenResponse.status,
+        message: { err: 'GitHub OAuth token request failed' },
       });
     }
 
-    const user = data.user;
-    console.log('Authenticated GitHub User:', user);
+    // console.log("Token Response Status:", tokenResponse.status);
+    // console.log("Token Response Headers:", tokenResponse.headers);
+    // get access_token
+    const tokenData = await tokenResponse.json();
+    console.log("tokenData: ", tokenData);
+    if (!tokenData.access_token) {
+      return next({ status: 401, message: 'Failed to get GitHub access token' });
+    }
 
-    const accessToken = generateToken(user.id);
-    const refreshToken = generateRefreshToken(user.id);
+    // send request to github/user with access_token to get information
+    const userResponse = await fetch('https://api.github.com/user', {
+      headers: { Authorization: `token ${tokenData.access_token}` },
+    });
+
+    const userData = await userResponse.json();
+    // console.log("userData: ",userData);
+    if (!userData.id) {
+      return next({ status: 401, message: 'Failed to get GitHub user data' });
+    }
+
+    // console.log('GitHub User Data:', userData);
+
+    const accessToken = generateToken(userData.id);
+    const refreshToken = generateRefreshToken(userData.id);
 
     // attach accessToken and refresh token to http-only cookie
-    res.cookie('accessToken', accessToken, { httpOnly: true, maxAge: 15 * 60 * 1000 }); // 15 min
-    res.cookie('refreshToken', refreshToken, { httpOnly: true, maxAge: 7 * 24 * 60 * 60 * 1000 }); // 7 days
+    res.cookie('accessToken', accessToken, {
+      httpOnly: true,
+      maxAge: 15 * 60 * 1000,
+    }); // 15 min
+    res.cookie('refreshToken', refreshToken, {
+      httpOnly: true,
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    }); // 7 days
 
-    return res.redirect('/secret');
+    return res.redirect('http://localhost:3000/profile');
   } catch (err) {
     return next(err);
   }
@@ -132,16 +147,18 @@ const refreshAccessToken = (req, res, next) => {
     // decode the token to get userid and regenerate JWT token
     const newAccessToken = generateToken(decoded.userId);
     // update the accessToken attached to res to be new one
-    res.json({ accessToken: newAccessToken});
+    res.json({ accessToken: newAccessToken });
   });
-
-}
+};
 
 const logout = async (req, res) => {
-  await supabase.auth.signOut();
-  res.clearCookie('accessToken');
-  res.clearCookie('refreshToken');
-  res.json({ message: 'Logged out successfully' });
-}
+  // await supabase.auth.signOut();
+  res.cookie('accessToken', '', { httpOnly: true, maxAge: 0 });
+  res.cookie('refreshToken', '', { httpOnly: true, maxAge: 0 });
+  req.session.forceLogin = true;
+  res.redirect('https://github.com/logout?return_to=https://github.com/login');
+  // res.json({ message: 'Logged out successfully' });
+  
+};
 
-module.exports = { githubLogin, githubCallback, refreshAccessToken, logout };
+export { githubLogin, githubCallback, refreshAccessToken, logout };
